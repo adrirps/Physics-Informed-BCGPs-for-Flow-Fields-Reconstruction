@@ -5,7 +5,7 @@
 
 # Physics-Informed BCGPs for Flow Fields Reconstruction : Flow around cylinder profile
 
-# Authored by Adrian Padilla-Segarra (ONERA and INSA Toulouse) - Sep. 2025
+# Authored by Adrian Padilla-Segarra (ONERA and INSA Toulouse) - Jan. 2026
 
 
 # -------------------------------------------------------------------------------------------------------------
@@ -16,7 +16,7 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 
-import core.model_tools as model_tools
+from core.models import GPR_model
 import core.kernels as knp
 import core.GPR as gp
 import core.data_treatment as data_tools
@@ -41,11 +41,8 @@ def get_parser():
     parser.add_argument("--KL_measure", type = str, default = 'pushforward')
     parser.add_argument("--spectral_precision", type = str, default = 'last') # or 'grid'
 
-    # estimation
-    parser.add_argument("--plot_estimate", type = str, default = 'velocity') # or 'total_SD'
-
     # visualization
-    parser.add_argument("--visualize", action ='store_true') # field estimations
+    parser.add_argument("--hide_colorbar", action ='store_true')
 
     return  parser.parse_args()
 
@@ -59,11 +56,13 @@ config.boundary_definition = {
     'outlet'        : 'all_data_points',
 }
 
+config.visualize = True
+
 # -------------------------------------------------------------------------------------------------------------
 # Initialization
 # -------------------------------------------------------------------------------------------------------------
 
-model = model_tools.main_tools(config)
+model = GPR_model(config)
 
 # -------------------------------------------------------------------------------------------------------------
 # Data
@@ -177,10 +176,9 @@ observations_dict = {
 model.Gram_size = model.X_obs.shape[0]*2
 
 # -------------------------------------------------------------------------------------------------------------
-# GPR-based Reconstruction and Relative error computation (with visualization)
+# GPR-based Reconstruction with UQ (total standard deviation)
 # -------------------------------------------------------------------------------------------------------------
 
-model.perform_GPR(GP, observations_dict, out_list = 'UQ', plot_list = config.plot_estimate)
-
+model.perform_GPR(GP, observations_dict, out_list = ['domain','UQ'], plot_list = ['velocity', 'total_SD'])
 
 plt.show()

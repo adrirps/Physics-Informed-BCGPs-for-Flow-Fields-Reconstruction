@@ -11,58 +11,52 @@ class GPR() :
 
 
     def set_nugget(self, **kwargs) :
+
         if ('use_nugget' in kwargs) and ('nugget_type' in kwargs) :
             self.use_nugget = kwargs.get('use_nugget')
             self.nugget_type = kwargs.get('nugget_type')
             self.nugget = kwargs.get('nugget')
-            if kwargs.get('use_nugget') == 'always' :
+            if self.use_nugget == 'always' :
                 print(f'[GPR] Nugget {self.nugget} set for all computations')
-            elif kwargs.get('use_nugget') == 'when_necessary' :
+            elif self.use_nugget == 'when_necessary' :
                 print(f'[GPR] Nugget {self.nugget} set only when computation fails')
 
 
     def interpolation(self, formula, X_new, observations_dict) :
 
-        X_obs = observations_dict['points']
-        values_cond = observations_dict['values']
         obs_structure = observations_dict['structure']
+
+        if 'points' in observations_dict :
+            X_obs = observations_dict['points']
+            values_cond = observations_dict['values']
 
         if obs_structure == 'velocity':
 
             # Posterior mean
 
-            if formula == 'matrix_K_mean' :
+            if formula.endswith('mean') :
 
-                print(f'[GPR] Computing mean with matrix kernel over {X_new.shape[0]} new points')
-
-                Cross_matrix = self.kernel_function.compute_matrix_incompressible('id','id', X_new, X_obs)
+                Cross_matrix = self.Cross_covariance_assembly(formula, obs_structure, X_new, observations_dict)
                 Gram_matrix = self.kernel_function.compute_matrix_incompressible('id','id', X_obs, X_obs)
 
                 val = self.regression(Cross_matrix, Gram_matrix, values_cond)
 
-            if formula == 'scalar_stream_mean' :
-
-                print(f'[GPR] Computing mean with matrix kernel over {X_new.shape[0]} new points')
-
-                stream_Cross_matrix = self.kernel_function.compute_vector_stream(X_new, X_obs)
-                Gram_matrix = self.kernel_function.compute_matrix_incompressible('id','id', X_obs, X_obs)
-
-                val = self.regression(stream_Cross_matrix, Gram_matrix, values_cond)
-
-
             # Posterior covariance
-
-            elif formula == 'matrix_K_covariance' :
+            elif formula == 'velocity_covariance' :
 
                 Gram_matrix = self.kernel_function.compute_matrix_incompressible('id','id', X_obs, X_obs)
 
                 if not isinstance(X_new, dict):
 
-                    print(f'[GPR] Computing variance with matrix kernel over {X_new.shape[0]} points')
+                    print(f'[GPR] Computing Cross variance with matrix kernel over {X_new.shape[0]} points')
 
                     Cross_matrix_left = self.kernel_function.compute_matrix_incompressible('id','id', X_new, X_obs)
                     Cross_matrix_right = Cross_matrix_left.transpose()
+
+                    print(f'[GPR] Computing prior variance with matrix kernel over {X_new.shape[0]} points')
                     Cov_priori = self.kernel_function.compute_matrix_incompressible('id','id', X_new, X_new)
+
+                    print(f'[GPR] Kernel computations done')
 
                 else :
 
@@ -79,7 +73,7 @@ class GPR() :
 
             # Posterior mean with observations from velocity and normal component ( curl u \cdot n = 0 )
 
-            values_cond_normal  = np.zeros((observations_dict['points_normal'].shape[0],))
+            values_cond_normal  = np.zeros((observations_dict['points_normal'].shape[0],)) # values set to zero
             values_cond_all = np.concatenate((values_cond, values_cond_normal))
 
             print(f'[GPR] Computing mean with matrix kernel over {X_new.shape[0]} new points')
@@ -94,7 +88,21 @@ class GPR() :
     
     def Cross_covariance_assembly(self, formula, obs_structure, X_new, observations_dict):
 
-        if obs_structure == 'velocity_and_normal':
+        if obs_structure == 'velocity':
+
+            # get positions
+            X_obs = observations_dict['points']
+
+            if formula == 'velocity_mean':
+
+                Cross_matrix = self.kernel_function.compute_matrix_incompressible('id','id', X_new, X_obs)
+
+            elif formula == 'scalar_stream_mean' :
+
+                Cross_matrix = self.kernel_function.compute_vector_stream(X_new, X_obs)
+
+
+        elif obs_structure == 'velocity_and_normal':
 
             # get positions
             X_obs = observations_dict['points']
@@ -107,7 +115,7 @@ class GPR() :
                 normal_vectors = normal_vectors.flatten()[:, np.newaxis]
 
             # computations
-            if formula == 'matrix_K_mean':
+            if formula == 'velocity_mean':
 
                 Cross_matrix = np.zeros((2*X_new.shape[0], Cross_dim))
 
@@ -173,11 +181,10 @@ class GPR() :
         # compute lower triangular with nugget type
 
         if self.use_nugget == 'always' :
-            Gram_matrix_original = Gram_matrix
+            Gram_matrix_original = Gram_matrix.copy()
             Gram_matrix = self.add_nugget(Gram_matrix)
             L = sp.linalg.cholesky(Gram_matrix).transpose()
             print(f'[GPR] Permanent nugget {self.nugget} used')
-
 
         elif self.use_nugget == 'when_necessary':
             try :

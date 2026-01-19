@@ -5,31 +5,28 @@ import matplotlib.pyplot as plt
 import  matplotlib.ticker as plticker
 import matplotlib.tri as ptri
 import matplotlib.path as pth
-import matplotlib.patches as patches
-import time
 
 from .profiles import cylinder, NACA_airfoil
 
 
 # Utilities for sampling, setting observations, performing estimations and visualization
 
-
 class main_tools():
 
     def __init__(self, input_config) :
 
-        self.print_title('GPR Model Initialization')
+        self.print_title('Model tools initialization')
         self.config = input_config
         return
 
     def define_domain(self, domain_input) :
 
+        self.print_title('Domain Definition')
+
         if hasattr(self.config, 'domain') :
             domain_raw = self.config.domain
         else :
             domain_raw = domain_input
-
-        self.print_title('Domain Definition')
 
         if isinstance(domain_raw, str) and domain_raw == 'from_data' :
             print(f'[GPR Model] Loading domain from data...')
@@ -48,10 +45,10 @@ class main_tools():
             indexes_domain = np.where((point_centers[:, 0] >= self.domain[0,0]) & (point_centers[:, 0] <= self.domain[0,1]) & 
                     (point_centers[:, 1] >= self.domain[1,0]) & (point_centers[:, 1] <= self.domain[1,1]))[0]
 
-            self.internal_data.foam_centres = self.internal_data.foam_centres[indexes_domain,:]
-            self.internal_data.foam_centres_tree = sp.spatial.KDTree(self.internal_data.foam_centres)
-            self.internal_data.foam_centres_triang = sp.spatial.Delaunay(self.internal_data.foam_centres)
-            self.internal_data.u_data_internal = self.internal_data.u_data_internal[:,indexes_domain,:]
+            self.foam_centres = self.internal_data.foam_centres[indexes_domain,:]
+            self.foam_centres_tree = sp.spatial.KDTree(self.internal_data.foam_centres)
+            self.foam_centres_triang = sp.spatial.Delaunay(self.internal_data.foam_centres)
+            self.u_data_internal = self.internal_data.u_data_internal[:,indexes_domain,:]
 
     def points_inside_domain(self, X_grid) :
 
@@ -71,18 +68,18 @@ class main_tools():
         
         if method == 'truth_at_data_points' :
 
-            foam_centres_filtered, indexes_domain = self.filter_domain_obstacle(self.internal_data.foam_centres)
+            foam_centres_filtered, indexes_domain = self.filter_domain_obstacle(self.foam_centres)
 
             # get all cell centers inside the domain :
-            indexes_left = self.internal_data.foam_centres[:,0] > domain_interpolation[0,0]
-            indexes_right = self.internal_data.foam_centres[:,0] < domain_interpolation[0,1]
-            indexes_down = self.internal_data.foam_centres[:,1] > domain_interpolation[1,0]
-            indexes_up = self.internal_data.foam_centres[:,1] < domain_interpolation[1,1]
+            indexes_left = self.foam_centres[:,0] > domain_interpolation[0,0]
+            indexes_right = self.foam_centres[:,0] < domain_interpolation[0,1]
+            indexes_down = self.foam_centres[:,1] > domain_interpolation[1,0]
+            indexes_up = self.foam_centres[:,1] < domain_interpolation[1,1]
             
             indexes = indexes_left*indexes_right*indexes_down*indexes_up*indexes_domain
 
-            X_domain = self.internal_data.foam_centres[indexes,:]
-            velocity_domain  = self.internal_data.u_data_internal[:,indexes,:]
+            X_domain = self.foam_centres[indexes,:]
+            velocity_domain  = self.u_data_internal[:,indexes,:]
 
             if N_domain_interpolation == 'all' :
                 pass
@@ -104,6 +101,8 @@ class main_tools():
             # set truth : X_truth is the same as domain
             if 'fixed_time' in kwargs :
                 velocity_truth = velocity_domain[fixed_time_it,:,:]
+            else:
+                velocity_truth = velocity_domain
 
             self.N_truth = X_domain.shape[0]
 
@@ -118,8 +117,10 @@ class main_tools():
             X_domain = np.concatenate((self.X_boundary_walls, X_domain))
             velocity_truth = np.concatenate((self.velocity_boundary_walls, velocity_truth))
 
+
         self.X_domain = X_domain
         self.velocity_truth = velocity_truth
+
 
         X_domain_filtered, indexes_domain = self.filter_domain_obstacle(X_domain)
         self.X_domain_filtered = X_domain_filtered
@@ -127,11 +128,13 @@ class main_tools():
         self.N_domain_filtered = self.X_domain_filtered.shape[0]
 
         if 'airfoil_box_distance_interpolation' in kwargs :
-            self.set_airfoil_box_evaluation(distance_tol = kwargs.get('airfoil_box_distance_interpolation'), fixed_time = fixed_time_it)
+            self.set_airfoil_box_evaluation(distance_tol = kwargs.get('airfoil_box_distance_interpolation'), **kwargs)
 
         self.N_domain = self.X_domain.shape[0]
 
         print(f'[Model] Domains points computed at {self.N_domain} points')
+
+
 
     def filter_domain_obstacle(self, X_domain, **kwargs):
         
@@ -160,7 +163,34 @@ class main_tools():
             return X_domain, indexes, inner_indexes
         else : 
             return X_domain, indexes
-        
+
+    def check_extrapolation(self, X_grid, X_obs) :
+
+        if self.config.obstacle_type == 'NACA_airfoil' :
+
+            idx_half = X_obs[:,1] >= (self.domain[1,0] + self.domain[1,1])/2
+            X_up = X_obs[idx_half,:]
+            X_down = X_obs[ ~ idx_half,:]
+
+            temp, idx_up = self.filter_convex_hull(X_grid, X_up)
+            temp, idx_down = self.filter_convex_hull(X_grid, X_down)
+            idx =  idx_up | idx_down
+
+        else :
+            return X_grid, np.array(range(X_grid.shape[0]))
+
+        return X_grid[idx], idx
+
+    def filter_convex_hull(self, X_grid, X_filter) :
+        # This utility checks whether X_grid is in convex hull of X_filter
+
+        outer_hull = sp.spatial.ConvexHull(X_filter)
+        hull_points = X_filter[outer_hull.vertices]
+        hull_path = pth.Path(np.vstack([hull_points, hull_points[0]]))
+        idx = hull_path.contains_points(X_grid)
+        X_inside = X_grid[idx]
+
+        return X_inside, idx 
 
     def filter_close_points(self, X_grid, tol_dist) :
         X_grid_tree = sp.spatial.KDTree(X_grid)
@@ -169,19 +199,19 @@ class main_tools():
         for i_grid in range(len(X_grid)):
             if not indexes[i_grid]:  
                 continue
-            neighbors = X_grid_tree.query_ball_point(X_grid[i_grid], tol_dist) # to remove
+            neighbors = X_grid_tree.query_ball_point(X_grid[i_grid], tol_dist) # idx to remove
             for it_neighbors in neighbors:
                 if it_neighbors > i_grid:
                     indexes[it_neighbors] = False
         
         return X_grid[indexes], indexes
 
+
     def set_boundary(self, **kwargs) :
 
         self.print_title('Boundary Points Setting')
 
         fixed_time = kwargs.get('fixed_time')
-
 
         X_boundary = []
         velocity_boundary = []
@@ -244,8 +274,10 @@ class main_tools():
 
         self.X_boundary = X_boundary
         self.velocity_boundary = velocity_boundary
+
         self.X_boundary_walls = X_boundary_walls
         self.velocity_boundary_walls = velocity_boundary_walls
+
         self.N_boundary = self.X_boundary.shape[0]
 
         self.reset_domain_from_boundary()
@@ -276,7 +308,9 @@ class main_tools():
         if isinstance(fixed_time, (int, float)) and len(velocity_grid.shape) == 3 :
             velocity_grid = velocity_grid[fixed_time,:,:]
             print(f'[GPR Model] Velocity restricted to time iteration = {fixed_time}')
+
         return X_grid, velocity_grid
+
 
     def reset_domain_from_boundary(self) :
         new_domain = np.zeros((2,2))
@@ -294,7 +328,6 @@ class main_tools():
         # set interpolation points : over obstacle boundary
         N_grid = N_obstacle_points
 
-        
         if self.config.obstacle_type == 'cylinder' :
 
             s_grid = np.linspace(0, 2*np.pi, N_grid + 1)[:-1]
@@ -322,7 +355,8 @@ class main_tools():
             X_obstacle[:,0] = X_obstacle[:,0] + center_0
             X_obstacle[:,1] = X_obstacle[:,1] + center_1
 
-        # set inside domain only
+
+        # set inside domain only and convex hull
 
         indexes_domain = np.where((X_obstacle[:, 0] >= self.domain[0,0]) & (X_obstacle[:, 0] <= self.domain[0,1]) & 
                         (X_obstacle[:, 1] >= self.domain[1,0]) & (X_obstacle[:, 1] <= self.domain[1,1]))[0]
@@ -330,11 +364,38 @@ class main_tools():
         X_obstacle = X_obstacle[indexes_domain,:]
         s_grid = s_grid[indexes_domain]
 
-        self.X_obstacle = X_obstacle
-        self.N_obstacle = self.X_obstacle.shape[0]
-        self.obstacle_s_grid = s_grid # for error computation
+        # for visualization
+        self.X_obstacle_visu = X_obstacle.copy()
 
-        print(f'[GPR Model] Obstacle points set at {self.N_obstacle} points')
+        # check convex hull
+        X_obstacle, idx = self.check_extrapolation(X_obstacle, self.foam_centres)
+        s_grid = s_grid[idx]
+
+        # compute unit normal vectors (and tangents)
+
+        if self.config.obstacle_type == 'cylinder' :
+
+            normal_grid_x = np.cos(s_grid) # outward unit normal
+            normal_grid_y = np.sin(s_grid)
+            tangent_grid = np.vstack((- normal_grid_y, normal_grid_x)).transpose()
+
+        elif self.config.obstacle_type == 'NACA_airfoil' :
+
+            # normal and tanget vectors 
+            tangent_grid, filter_indexes_temp = self.airfoil.curve_derivatives_values(1, chord_length, s_series = s_grid, normalized = True)
+            normal_grid_x = tangent_grid[:,1]
+            normal_grid_y = - tangent_grid[:,0] # outward unit normal
+
+
+        self.X_obstacle = X_obstacle
+        self.gamma_grid = s_grid
+        self.N_obstacle = self.X_obstacle.shape[0]
+
+        self.tangent_grid = tangent_grid
+        self.normal_grid = np.vstack((normal_grid_x, normal_grid_y)).transpose()
+
+        print(f'[GPR Model] Obstacle points (and unit normal vectors) set at {self.N_obstacle} points')
+
 
     def compute_airfoil_box(self, distance_tol, **kwargs) :
 
@@ -367,10 +428,10 @@ class main_tools():
 
         closed_box_path = np.vstack((box_vertices,box_vertices[0,:]))
         box_path = pth.Path(closed_box_path)
-        indexes = box_path.contains_points(self.internal_data.foam_centres)
+        indexes = box_path.contains_points(self.foam_centres)
 
-        X_airfoil_box = self.internal_data.foam_centres[indexes,:]
-        velocity_airfoil_box = self.internal_data.u_data_internal[:,indexes,:]
+        X_airfoil_box = self.foam_centres[indexes,:]
+        velocity_airfoil_box = self.u_data_internal[:,indexes,:]
 
         # filter data in airfoil domain
 
@@ -409,118 +470,19 @@ class main_tools():
         self.print_title('Airfoil box - evaluation')
         X_airfoil_box_eval, velocity_airfoil_box_eval = self.compute_airfoil_box(distance_tol, **kwargs)
         X_airfoil_box_eval_filtered, indexes_filter = self.filter_close_points(X_airfoil_box_eval, 0.002)
-        velocity_airfoil_box_eval_filtered = velocity_airfoil_box_eval[indexes_filter,:]
-
         new_X_domain = np.vstack((X_airfoil_box_eval_filtered, self.X_domain))
-        new_velocity_truth = np.vstack((velocity_airfoil_box_eval_filtered, self.velocity_truth))
-        
+        if 'fixed_time' in kwargs :
+            velocity_airfoil_box_eval_filtered = velocity_airfoil_box_eval[indexes_filter,:]
+            new_velocity_truth = np.vstack((velocity_airfoil_box_eval_filtered, self.velocity_truth))
+        else :
+            velocity_airfoil_box_eval_filtered = velocity_airfoil_box_eval[:,indexes_filter,:]
+            new_velocity_truth = np.concatenate((velocity_airfoil_box_eval_filtered, self.velocity_truth), axis = 1)
+
         self.X_domain = new_X_domain
         self.velocity_truth = new_velocity_truth
-        self.N_truth = self.velocity_truth.shape[0]
+        self.N_truth = self.X_domain.shape[0]
 
-        print('[GPR Model] Reset domain interpolation points with airfoil box') # ???
-
-    def set_airfoil_box(self, distance_tol, **kwargs) :
-
-        self.print_title('Airfoil box - observation')
-        
-        X_airfoil_box, velocity_airfoil_box = self.compute_airfoil_box(distance_tol, **kwargs)
-        self.X_airfoil_box = X_airfoil_box
-        self.velocity_airfoil_box = velocity_airfoil_box
-        print(['[GPR Model] Airfoil box set for observations'])
-
-
-
-    def perform_GPR(self, GP, observations_dict, **kwargs) :
-
-        self.print_title('Computing GPR')
-
-        # Mean computation
-
-        start_time_mean = time.time()
-
-        velocity_interpolation_domain = GP.interpolation('matrix_K_mean', self.X_domain, observations_dict)
-        velocity_interpolation_obstacle = GP.interpolation('matrix_K_mean', self.X_obstacle, observations_dict)
-
-        scalar_stream_obstacle = GP.interpolation('scalar_stream_mean', self.X_obstacle, observations_dict)
-
-        end_time_mean = time.time()
-
-        velocity_interpolation_domain = velocity_interpolation_domain.reshape((self.N_domain,2))
-        velocity_interpolation_obstacle = velocity_interpolation_obstacle.reshape((self.N_obstacle,2))
-
-        print(f"Execution mean interpolation time: {end_time_mean - start_time_mean:.6f} seconds")
-
-        # Uncertainty computation
-
-        if 'out_list' in kwargs :
-            out_input = kwargs.get('out_list')
-            if 'UQ' in out_input :
-
-                start_time_cov = time.time()
-
-                UQ_velocity_interpolation_domain = GP.interpolation('matrix_K_covariance', self.X_domain, observations_dict)
-                UQ_velocity_interpolation_domain_trace = np.sqrt( np.diag(UQ_velocity_interpolation_domain[::2, ::2] + UQ_velocity_interpolation_domain[1::2, 1::2]) )
-
-                end_time_cov = time.time()
-
-                print(f"Execution covariance interpolation time: {end_time_cov - start_time_cov:.6f} seconds")
-
-        # Plots
-
-        if hasattr(self.config, 'visualize') and self.config.visualize :
-            
-            plot_dict = {
-                'velocity_interpolation_obstacle'           :   velocity_interpolation_obstacle,
-                'velocity_interpolation_domain'             :   velocity_interpolation_domain
-            }
-
-            if 'plot_list' in kwargs :
-                plot_list = kwargs.get('plot_list')
-                if 'total_SD' in plot_list :
-                    plot_dict['UQ_velocity_interpolation_domain_trace'] = UQ_velocity_interpolation_domain_trace
-                    self.do_plot(plot_dict, method = 'total_SD')
-                elif 'velocity' in plot_list :
-                    self.do_plot(plot_dict, method = 'interpolation')
-
-
-            if hasattr(self, 'velocity_truth'):
-
-                # compute relative error
-                velocity_truth_norms = np.linalg.norm(self.velocity_truth, axis = 1)
-
-                if np.any(velocity_truth_norms == 0) :
-                    idx = velocity_truth_norms == 0
-                    small_element_limit = velocity_truth_norms[ ~ idx].min()
-                    velocity_truth_norms[idx] += small_element_limit
-
-                error_domain_abs = (velocity_interpolation_domain - self.velocity_truth)
-                error_domain_rel = np.zeros((self.velocity_truth.shape[0],2))
-                error_domain_rel[:,0] = error_domain_abs[:,0] / velocity_truth_norms
-                error_domain_rel[:,1] = error_domain_abs[:,1] / velocity_truth_norms
-
-                # plot error
-                plot_dict_error = {
-                    'velocity_interpolation_obstacle'   : velocity_interpolation_obstacle,
-                    'error_domain_relative'             : error_domain_rel
-                }
-                self.do_plot(plot_dict_error, method = 'error_relative')
-        
-        # out object
-        if 'out_list' in kwargs :
-            out_input = kwargs.get('out_list')
-            
-            out_dict = {}
-            if 'domain' in out_input :
-                out_dict['domain'] = velocity_interpolation_domain
-            if 'obstacle' in out_input :
-                out_dict['obstacle'] = velocity_interpolation_obstacle
-            if 'stream' in out_input :
-                out_dict['stream'] = scalar_stream_obstacle
-            if 'UQ' in out_input :
-                out_dict['UQ_domain_trace'] = UQ_velocity_interpolation_domain_trace
-            
-            return out_dict
+        print('[GPR Model] Domain interpolation updated with airfoil box')
 
 
     def build_grid(self, N_grid, domain, **kwargs) :
@@ -574,7 +536,43 @@ class main_tools():
 
         print(f'[GPR model] Local region ({method}) set at {X_grid.shape[0]} points')
 
-        return X_grid, velocity_grid, tol_distance/2
+        return X_grid, tol_distance/2
+
+
+    def build_noised_grid_domain(self, seed, N_grid, **kwargs) :
+
+        X_grid_raw = self.build_grid(N_grid, self.domain, with_limits = False)
+
+        # noise
+        np.random.seed(seed)
+        if 'noise_level' in kwargs:
+            noise_level = kwargs.get('noise_level')
+        else :
+            noise_level = 0.005
+        X_grid = X_grid_raw + np.random.normal(0, noise_level, X_grid_raw.shape[0]*2).reshape(X_grid_raw.shape)
+
+        # add local region
+        if 'N_local_region' in kwargs :
+            N_local_region = kwargs.get('N_local_region')
+            X_local_region, tol_temp = self.set_local_region('circle', N_region = N_local_region,
+                                                                    region_parameters = [-0.007, 0, 0.03] )
+            X_grid = np.concatenate((X_local_region, X_grid))
+
+        # filter out of domain, obstacle and close points
+        X_grid, temp = self.points_inside_domain(X_grid)
+        if 'left_x_limit' in kwargs :
+            left_x_limit = kwargs.get('left_x_limit')
+            X_grid = X_grid[ X_grid[:,0] > left_x_limit ,:]
+
+        X_grid, temp = self.filter_domain_obstacle(X_grid)
+        X_grid, temp = self.check_extrapolation(X_grid, self.foam_centres)
+        X_grid, temp = self.filter_close_points(X_grid, tol_dist = 0.003)
+
+        print(f'[Model] Domain grid set at {X_grid.shape[0]} positions')
+
+        return X_grid
+
+
 
     def add_discrete_obstacle_observation(self, method, N_discrete) :
 
@@ -621,30 +619,39 @@ class main_tools():
             return X_obstacle_discrete, normal_grid
 
 
+    def get_true_fields(self, it_time, X_grid, out_list) :
+
+        # get triangular convex hull
+        indexes = self.foam_centres_triang.find_simplex(X_grid)
+        if np.any(indexes < 0) :
+
+            raise ValueError('[Error] Points outside truth domain')
+
+        nearest_cell_centres_indexes = self.foam_centres_triang.simplices[indexes]
+        nearest_cell_centres = self.foam_centres[nearest_cell_centres_indexes]
+        nearest_cell_velocities = self.u_data_internal[it_time,:,:][nearest_cell_centres_indexes]
+        out_dict = {}
+
+        # compute fields
+        if 'velocity' in out_list :
+            velocity_grid = np.zeros((X_grid.shape[0],2))
+            for it_x in range(X_grid.shape[0]) :
+                if np.any(nearest_cell_centres[it_x,:,:] - X_grid[it_x,:] == 0) :
+                    idx = (nearest_cell_centres[it_x,:,:] - X_grid[it_x,:] == 0).all(axis = 1)
+                    velocity_grid[it_x,:] = nearest_cell_velocities[it_x,idx,:]
+                else :
+                    velocity_grid[it_x,0] = sp.interpolate.griddata(nearest_cell_centres[it_x,:,:], nearest_cell_velocities[it_x,:,0], X_grid[it_x,:], method = 'linear')
+                    velocity_grid[it_x,1] = sp.interpolate.griddata(nearest_cell_centres[it_x,:,:], nearest_cell_velocities[it_x,:,1], X_grid[it_x,:], method = 'linear')
+            out_dict['velocity'] = velocity_grid
+
+        return out_dict
+
+
     def compute_obstacle_normal_error(self, velocity_obstacle, **kwargs) :
 
-        # compute normal unit vectors
-        s_grid = self.obstacle_s_grid
-        
-        if self.config.obstacle_type == 'cylinder' :
-            normal_grid_x = np.cos(s_grid) # unit normal
-            normal_grid_y = np.sin(s_grid)
-
-            tangent_grid = np.vstack((- normal_grid_y, normal_grid_x)).transpose()
-
-        elif self.config.obstacle_type == 'NACA_airfoil' :
-
-            c_length = self.config.obstacle_parameters[3]
-            tangent_grid, filter_indexes = self.airfoil.curve_derivatives_values(1, c_length, s_series = s_grid, normalized = True)
-            velocity_obstacle = velocity_obstacle[filter_indexes,:]
-            normal_grid_x = tangent_grid[:,1]
-            normal_grid_y = - tangent_grid[:,0] # outward unit normal
-
-        normal_grid = np.vstack((normal_grid_x, normal_grid_y)).transpose()
-
         # compute normal and tangent projection
-        normal_projections = np.sum(normal_grid*velocity_obstacle, axis = 1)
-        tangent_projections = np.sum(tangent_grid*velocity_obstacle, axis = 1)
+        normal_projections = np.sum(self.normal_grid*velocity_obstacle, axis = 1)
+        tangent_projections = np.sum(self.tangent_grid*velocity_obstacle, axis = 1)
 
         if 'relative' in kwargs and kwargs.get('relative') :
 
@@ -659,36 +666,48 @@ class main_tools():
         return np.abs(normal_projections), np.abs(tangent_projections)
 
 
-
     def do_plot(self, plot_dict, method, **kwargs) :
 
         if method == 'error_relative' :
             error_domain = plot_dict['error_domain_relative']
+        if method == 'source_error' :
+            source_error_domain = plot_dict['source_error_domain']
         elif method == 'data':
             velocity_data_domain = plot_dict['velocity_data_domain']
         elif method == 'interpolation' :
             velocity_interpolation_domain = plot_dict['velocity_interpolation_domain']
+        elif method == 'u_error' :
+            field_error = plot_dict['u_error']
         elif method == 'total_SD' :
             UQ_velocity_interpolation_domain_trace = plot_dict['UQ_velocity_interpolation_domain_trace']
+        elif method == 'scalar_variance' :
+            velocity_scalar_variance = plot_dict['velocity_scalar_variance']
+        elif method == 'UQ_field' :
+            field_UQ = plot_dict['UQ_field']
 
-        plot_colorbar = True
+
         plot_size = 10
         plot_size_scale = (plot_size * (self.domain[1,1]-self.domain[1,0])/(self.domain[0,1]-self.domain[0,0]))*1.1
-        if plot_colorbar :
-            fig = plt.figure(figsize = (plot_size+2,plot_size_scale))
-        else:
-            fig = plt.figure(figsize = (plot_size,plot_size_scale))
+        fig = plt.figure(figsize = (plot_size,plot_size_scale))
         
-        if method != 'data' :
+        if not method.startswith('data') :
 
             point_size = 50
 
-            plt.scatter(self.X_obs[:, 0], self.X_obs[:, 1], marker="o", zorder = 15, alpha = 0.3, facecolors='none', edgecolors='black', s = point_size, label="Grid Points")
+            if hasattr(self, 'X_obs') :
+                if hasattr(self, 'U_obs') :
+                    plt.quiver(self.X_obs[:, 0], self.X_obs[:, 1], self.U_obs[:,0], self.U_obs[:,1], units='dots', width = 1.25, scale = 7, scale_units = 'x', zorder=15)
+                else :
+                    plt.scatter(self.X_obs[:, 0], self.X_obs[:, 1], marker=".", color = 'black', zorder = 15, alpha = 0.8, s = point_size/7, label="U Observation")
 
             if hasattr(self,'X_normal_obs'):
                 plt.scatter(self.X_normal_obs[:, 0], self.X_normal_obs[:, 1], marker="*", zorder = 10, alpha = 0.6, facecolors='none', edgecolors='black', s = point_size + 20)
 
-        X_grid_for_tri = self.X_domain
+
+        if ('X_grid' in plot_dict) :
+            X_grid_for_tri = plot_dict['X_grid']
+        else :
+            X_grid_for_tri = self.X_domain # filter tri for plot
         X_triang = ptri.Triangulation(X_grid_for_tri[:,0], X_grid_for_tri[:,1])
 
         if method == 'error_relative' :
@@ -699,11 +718,51 @@ class main_tools():
             colormap_plot = plt.tricontourf(X_triang, error_norm, levels = levels, cmap = 'brg',
                                         vmin = 0, vmax = error_max_plot )
             
+        elif method == 'source_error' :
+            emax = source_error_domain.max()
+            emin = 0.0
+            levels = np.linspace(emin, emax, 150)
+            colormap_plot = plt.tricontourf(X_triang, source_error_domain, levels = levels, cmap = 'brg',
+                                        vmin = emin, vmax = emax )
+            
         elif method == 'total_SD' :
             vmax_plot = UQ_velocity_interpolation_domain_trace.max()*1.1
             levels = np.linspace(0, vmax_plot, 100)
             colormap_plot = plt.tricontourf(X_triang, UQ_velocity_interpolation_domain_trace, alpha = 0.5, cmap = 'viridis',
                                             vmin = 0, vmax = vmax_plot, levels = levels )
+
+        elif method == 'scalar_variance' :
+            if velocity_scalar_variance.shape[0] != self.N_domain :
+                X_triang = ptri.Triangulation(self.X_domain_UQ[:,0], self.X_domain_UQ[:,1])
+
+            if 'levels' in kwargs :
+                levels = kwargs.get('levels')
+                emax_plot = levels[-1]
+            else :
+                emax_plot = velocity_scalar_variance.max()
+                levels = np.linspace(0, emax_plot, 150)
+
+            if 'get_scales' in kwargs and kwargs.get('get_scales') :
+                out_dict = { 'levels' : levels }
+
+            colormap_plot = plt.tricontourf(X_triang, velocity_scalar_variance, alpha = 0.5, cmap = 'viridis',
+                                            vmin = 0, vmax = emax_plot, levels = levels )
+
+
+        elif method.endswith('error') :
+
+            emax = kwargs.get('plot_max')
+            emin = kwargs.get('plot_min')
+            levels = np.linspace(emin, emax, 150)
+            colormap_plot = plt.tricontourf(X_triang, field_error, levels = levels, cmap = 'brg', vmin = emin, vmax = emax )
+
+        elif method == 'UQ_field' :
+
+            emax = kwargs.get('plot_max')
+            emin = kwargs.get('plot_min')
+            levels = np.linspace(emin, emax, 150)
+            colormap_plot = plt.tricontourf(X_triang, field_UQ, levels = levels, cmap = 'viridis', vmin = emin, vmax = emax )
+
 
         else :
             if method == 'interpolation' :
@@ -715,54 +774,81 @@ class main_tools():
             norm_velocity_domain = np.linalg.norm(velocity_plot_domain, axis = 1)
             if method == 'data' :
                 vmax_plot = norm_velocity_domain.max()*1.1
-                self.do_plot_vmax = vmax_plot
-            elif method == 'interpolation' :
+                self.plot_max_velocity = vmax_plot
+                self.internal_data.plot_max_velocity = self.plot_max_velocity
+
+            elif method == 'interpolation' or method == 'u_residual' :
                 try : 
-                    vmax_plot = self.do_plot_vmax
+                    vmax_plot = self.plot_max_velocity
                 except :
                     vmax_plot = norm_velocity_domain.max()*1.1
 
-            levels = np.linspace(0, vmax_plot, 100)
-            colormap_plot = plt.tricontourf(X_triang, norm_velocity_domain, levels = levels, alpha = 0.6, cmap = 'rainbow',
-                                        vmin = 0, vmax = vmax_plot, antialiased=False    )
+            if hasattr(self, 'plot_u_max'): # only for velocity
+                vmax_plot = self.plot_u_max
 
-        
-        X_obstacle = self.X_obstacle
-        object = plt.fill(X_obstacle[:,0],X_obstacle[:,1], 0.8, color='gray')
+            vmin_plot = 0
+            levels = np.linspace(vmin_plot, vmax_plot, 200)
+            if not hasattr(self, 'v_map') :
+                self.v_map = 'rainbow' # default
+            colormap_plot = plt.tricontourf(X_triang, norm_velocity_domain, levels = levels, alpha = 0.55, cmap = self.v_map,
+                                        vmin = vmin_plot, vmax = vmax_plot, antialiased=False    )
+
+        object = plt.fill(self.X_obstacle_visu[:,0], self.X_obstacle_visu[:,1], 0.8, color='gray')
 
         # format
+        if 'title' in kwargs :
+            plt.title(kwargs.get('title'))
+        else :
+            plt.title(f'Field : {method}')
+
         plt.axis('equal')
-        plt.xlim(self.domain[0,0], self.domain[0,1])
         plt.ylim(self.domain[1,0], self.domain[1,1])
+        plt.xlim(self.domain[0,0], self.domain[0,1])
 
         fontsize = 20
 
         plt.xticks(fontsize=fontsize)
         plt.yticks(fontsize=fontsize)
 
-        if plot_colorbar :
+        if not self.config.hide_colorbar :
             cb_ax = fig.add_axes([0.91, 0.124, 0.02, 0.754])
-            cbar = plt.colorbar(colormap_plot, cax = cb_ax, format=plticker.FormatStrFormatter('%.3f'))
+            if np.abs(colormap_plot.norm.vmax + colormap_plot.norm.vmin)/2 < 1e-2 :
+                colorbar_format = plticker.FormatStrFormatter('%.2e')
+            elif np.abs(colormap_plot.norm.vmax + colormap_plot.norm.vmin)/2 < 1.0 :
+                colorbar_format = plticker.FormatStrFormatter('%.3f')
+            else :
+                colorbar_format = plticker.FormatStrFormatter('%.2f')
+            cbar = plt.colorbar(colormap_plot, cax = cb_ax, format = colorbar_format)
             cbar.ax.tick_params(labelsize = fontsize)
 
         # save plot
-        if method == 'error_relative' :
+        
+        if 'save_name' in kwargs :
+            save_name = kwargs.get('save_name') + '.pdf'
+        elif method == 'error_relative' :
             save_name = 'relative_error.pdf'
+        elif method == 'source_error' :
+            save_name = 'source_error.pdf'
         elif method == 'interpolation' :
             save_name = 'velocity_interpolation.pdf'
-            print(f'[Observation] Design direct observations size : {self.X_obs.shape[0]}')
+            if hasattr(self, 'X_obs') :
+                print(f'[Observation] Design direct observations size : {self.X_obs.shape[0]}')
             if hasattr(self, 'X_normal_obs') :
                 print(f'[Observation] Design discrete BC observations size {self.X_normal_obs.shape[0]}' )
         elif method == 'data' :
-            save_name = 'data.pdf'
+            save_name = 'data_velocity.pdf'
         elif method == 'total_SD' :
             save_name = 'sqrt_trace_variance.pdf'
-        elif method == 'variance' :
-            save_name = 'variance_field.pdf'
+        elif method == 'scalar_variance':
+            save_name = 'scalar_variance_field.pdf'
         try :
-            plt.savefig(r"simulation\BCGP_figures\\" + save_name, bbox_inches='tight', pad_inches=0.01)
+            plt.savefig(r".\BCGP_figures\\" + save_name, bbox_inches='tight', pad_inches=0.01)
         except :
-            raise ValueError('[Plot] Set correct path for saving figures')
+            Warning('[Plot] Set correct path for saving figures')
+
+        if 'out_dict' in locals() :
+            return out_dict
+
 
     def plot_profile_indicators(self, spectral_precision_grid, rel_agg_obstacle_normal, abs_scalar_stream ) :
 
@@ -777,28 +863,23 @@ class main_tools():
         return
 
 
-    def points_close_to_grid(self, N_grid, X_domain) :
+    def plot_solution_snapshot(self, **kwargs) :
 
-        # grid for visualization
-        X_grid = self.build_grid(N_grid, self.domain, with_limits = False)
-        X_grid, temp = self.filter_domain_obstacle(X_grid)
+        if 'time_it' in kwargs :
+            plot_velocity = self.velocity_truth[kwargs.get('time_it'),:]
+        else :
+            plot_velocity = self.velocity_truth
 
-        # search for closest points
-        domain_tree = sp.spatial.KDTree(X_domain)
-        distances, nearest_indexes = domain_tree.query(X_grid)
-        X_close = X_domain[nearest_indexes,:]
-
-        return X_close, nearest_indexes
-
-    def plot_solution_snapshot(self) :
-
-        plot_dict = { 'velocity_data_domain'  :  self.velocity_truth }
+        plot_dict = {   'velocity_data_domain'  :   plot_velocity   }
 
         self.do_plot(plot_dict, method = 'data') # use same X_domain as interpolation for comparison
 
     def print_title(self, text) :
+        width = 110
+        print(f"{'-' * ((width - len(text)))}{text}")
 
-        width = 100
+    def print_subtitle(self, text) :
+        width = 90
         print(f"{'-' * ((width - len(text)))}{text}")
 
 

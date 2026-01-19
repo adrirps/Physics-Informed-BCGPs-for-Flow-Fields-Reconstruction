@@ -34,15 +34,19 @@ class Kernel(object):
             scalar_kernel = kappa * smp.exp( - ( ((x1-y1)/sigma_1)**2 + ((x2-y2)/sigma_2)**2 )/2 )
 
         elif kernel_name == 'RBF_anisotropic_additive' :
-            lcor = self.kernel_parameters[1]
             sig  = self.kernel_parameters[0]
-            a1   = self.kernel_parameters[2]
-            a2   = self.kernel_parameters[3]
+            lcor = self.kernel_parameters[1]
+            alpha = self.kernel_parameters[2] # anisotropy at coarse scale 
+            modes = self.kernel_parameters[3]
 
-            scalar_kernel_one = ((sig)**2) * smp.exp( - ( ((x1-y1)**2 + (a1*(x2-y2))**2) / (lcor**2) ) /2 )
-            scalar_kernel_two = ((sig/4096)**2) * smp.exp( - ( ((x1-y1)**2 + (a2*(x2-y2))**2) / ((lcor/64)**2) ) /2 )
+            gamma = 6 # 2D power-law
 
-            scalar_kernel = scalar_kernel_one + scalar_kernel_two
+            scalar_kernel = ((sig)**2) * smp.exp( - ( ((x1-y1)**2 + (alpha*(x2-y2))**2) / (lcor**2) ) /2 )
+            for m in range(1, int(modes) + 1) :
+                alpha_m = max(alpha/ (2**(m)), 1.0)
+                print(f'[Kernel] Anisotropy parameter for fine scales (m = {m}): {alpha_m}')
+
+                scalar_kernel += ((sig/(2**(gamma*m)))**2) * smp.exp( - ( ((x1-y1)**2 + (alpha_m*(x2-y2))**2) / ((lcor/(2**(3*m)))**2) ) /2 )
 
         self.scalar_kernel_np = smp.lambdify([x1,x2,y1,y2], scalar_kernel, 'numpy')
         self.scalar_kernel = scalar_kernel
@@ -51,6 +55,8 @@ class Kernel(object):
 
 
     def load_derivatives(self) :
+
+        print('[Kernel] Loading derivatives...')
 
         x1,x2,y1,y2 = smp.symbols('x1,x2,y1,y2')
 
@@ -75,32 +81,24 @@ class Kernel(object):
         DDx1_G = smp.diff(self.scalar_kernel,x1,2)
         # DDx2
         DDx2_G = smp.diff(self.scalar_kernel,x2,2)
+        # Lx
+        Lx_G = DDx1_G + DDx2_G
         # DDy1
         DDy1_G = smp.diff(self.scalar_kernel,y1,2)
         # DDy2
         DDy2_G = smp.diff(self.scalar_kernel,y2,2)
-        # Lx
-        Lx_G = DDx1_G + DDx2_G
         # Ly
         Ly_G = DDy1_G + DDy2_G
 
-        K_kernel = smp.Matrix([[ Dx2_Dy2_G , - Dx2_Dy1_G],
-                               [ - Dx1_Dy2_G,  Dx1_Dy1_G]])
+        Dx1_Lx_G = smp.diff(Lx_G,x1)
+        # Dx2_Lx
+        Dx2_Lx_G = smp.diff(Lx_G,x2)
 
-        self.K_kernel_np = smp.lambdify([x1,x2,y1,y2], K_kernel, 'numpy')
-
-        # Dx1_k
-        Dx1_K = smp.diff(K_kernel,x1)
-        self.Dx1_K_np = smp.lambdify([x1,x2,y1,y2], Dx1_K, 'numpy')
-        # Dx2_k
-        Dx2_K = smp.diff(K_kernel,x2)
-        self.Dx2_K_np = smp.lambdify([x1,x2,y1,y2], Dx2_K, 'numpy')
         # Dx1_Ly
         Dx1_Ly_G = smp.diff(Ly_G,x1)
-        self.Dx1_Ly_G_np = smp.lambdify([x1,x2,y1,y2], Dx1_Ly_G, 'numpy') 
         # Dx2_Ly
         Dx2_Ly_G = smp.diff(Ly_G,x2)
-        self.Dx2_Ly_G_np = smp.lambdify([x1,x2,y1,y2], Dx2_Ly_G, 'numpy')
+
         # Dy1_Lx
         Dy1_Lx_G = smp.diff(Lx_G,y1)
         Lx_Dy1_G = Dy1_Lx_G
@@ -108,13 +106,18 @@ class Kernel(object):
         Dy2_Lx_G = smp.diff(Lx_G,y2)
         Lx_Dy2_G = Dy2_Lx_G
 
-        # Curlx^T_Ly
-        Curlx_Ly_G = smp.Matrix([ - Dx2_Ly_G, Dx1_Ly_G ])
-        self.Curlx_Ly_G_np = smp.lambdify([x1,x2,y1,y2], Curlx_Ly_G, 'numpy')
-        # Lx_Curly
-        Lx_Curly_G = smp.Matrix([ - Dy2_Lx_G, Dy1_Lx_G ])
-        self.Lx_Curly_G_np = smp.lambdify([x1,x2,y1,y2], Lx_Curly_G, 'numpy')
-        
+        # Order 4
+
+        # D4x1 (or DDDDx1)
+        D4x1_G = smp.diff(self.scalar_kernel,x1,4)
+        # D4x2 (or DDDDx1)
+        D4x2_G = smp.diff(self.scalar_kernel,x2,4)
+        # DDx1_DDx2
+        DDx1_DDx2_G = smp.diff(DDx1_G,x2,2)
+
+        # LxLx
+        LxLx_G = D4x1_G + (2 * DDx1_DDx2_G) + D4x2_G
+
         # DDx1_DDy1
         DDx1_DDy1_G = smp.diff(DDy1_G,x1,2)
         # DDx1_DDy2
@@ -126,54 +129,27 @@ class Kernel(object):
 
         # LxLy
         LxLy_G = DDx1_DDy1_G + DDx1_DDy2_G + DDx2_DDy1_G + DDx2_DDy2_G
-        self.LxLy_G_np = smp.lambdify([x1,x2,y1,y2], LxLy_G, 'numpy')
 
-        # Dx1_Curlx_Ly
-        Dx1_Curlx_Ly_G = smp.diff(Curlx_Ly_G,x1,1)
-        self.Dx1_Curlx_Ly_G_np = smp.lambdify([x1,x2,y1,y2], Dx1_Curlx_Ly_G, 'numpy') 
-        # Dx2_Curlx_Ly
-        Dx2_Curlx_Ly_G = smp.diff(Curlx_Ly_G,x2,1)
-        self.Dx2_Curlx_Ly_G_np = smp.lambdify([x1,x2,y1,y2], Dx2_Curlx_Ly_G, 'numpy') 
-        
-        # Dx1_Lx_Curly
-        Dx1_Lx_Curly_G = smp.diff(Lx_Curly_G,x1,1)
-        # Dx2_Lx_Curly
-        Dx2_Lx_Curly_G = smp.diff(Lx_Curly_G,x2,1)
-        # Gradx_Lx_Curly
-        Gradx_Lx_Curly_G = Dx1_Lx_Curly_G.row_join(Dx2_Lx_Curly_G).transpose()
-        self.Gradx_Lx_Curly_G_np = smp.lambdify([x1,x2,y1,y2], Gradx_Lx_Curly_G, 'numpy')
-        
-        # Dy1_Lx_Curly
-        Dy1_Lx_Curly_G = smp.diff(Lx_Curly_G,y1,1)
-        # Dy2_Lx_Curly
-        Dy2_Lx_Curly_G = smp.diff(Lx_Curly_G,y2,1)
-        # Grady_Lx_Curly
-        Grady_Lx_Curly_G = Dy1_Lx_Curly_G.row_join(Dy2_Lx_Curly_G).transpose()
-        self.Grady_Lx_Curly_G_np = smp.lambdify([x1,x2,y1,y2], Grady_Lx_Curly_G, 'numpy')
+        # Dx1_Lx_Dy1
+        Dx1_Lx_Dy1_G = smp.diff(Lx_Dy1_G,x1) 
+        # Dx1_Lx_Dy2
+        Dx1_Lx_Dy2_G = smp.diff(Lx_Dy2_G,x1) 
+        # Dx2_Lx_Dy1
+        Dx2_Lx_Dy1_G = smp.diff(Lx_Dy1_G,x2) 
+        # Dx2_Lx_Dy2
+        Dx2_Lx_Dy2_G = smp.diff(Lx_Dy2_G,x2) 
 
-        # DDx1_Lx_Curly
-        DDx1_Lx_Curly_G = smp.diff(Lx_Curly_G,x1,2)
-        # DDx2_Lx_Curly
-        DDx2_Lx_Curly_G = smp.diff(Lx_Curly_G,x2,2)
-        # LxLx_Curly
-        LxLx_Curly_G = DDx1_Lx_Curly_G + DDx2_Lx_Curly_G
-        self.LxLx_Curly_G_np = smp.lambdify([x1,x2,y1,y2], LxLx_Curly_G, 'numpy')
+        # Order 5
+
+         # Dy1_LxLx
+        Dy1_LxLx_G = smp.diff(LxLx_G,y1,1)
+         # Dy2_LxLx
+        Dy2_LxLx_G = smp.diff(LxLx_G,y2,1)
 
         # # Dx1_LxLy
         Dx1_LxLy_G = smp.diff(LxLy_G,x1,1)
         # # Dx2_LxLy
         Dx2_LxLy_G = smp.diff(LxLy_G,x2,1)
-        # Gradx_LxLy
-        Gradx_LxLy_G = smp.Matrix([ Dx1_LxLy_G, Dx2_LxLy_G])
-        self.Gradx_LxLy_G_np = smp.lambdify([x1,x2,y1,y2], Gradx_LxLy_G, 'numpy')
-
-        # # Dy1_LxLy
-        Dy1_LxLy_G = smp.diff(LxLy_G,y1,1)
-        # # Dy2_LxLy
-        Dy2_LxLy_G = smp.diff(LxLy_G,y2,1)
-        # Grady_LxLy
-        Grady_LxLy_G = smp.Matrix([ Dy1_LxLy_G, Dy2_LxLy_G])
-        self.Grady_LxLy_G_np = smp.lambdify([x1,x2,y1,y2], Grady_LxLy_G, 'numpy')
 
         # DDx1_LxLy
         DDx1_LxLy_G = smp.diff(LxLy_G,x1,2)
@@ -181,20 +157,36 @@ class Kernel(object):
         DDx2_LxLy_G = smp.diff(LxLy_G,x2,2)
         # LxLxLy
         LxLxLy_G = DDx1_LxLy_G + DDx2_LxLy_G
-        self.LxLxLy_G_np = smp.lambdify([x1,x2,y1,y2], LxLxLy_G, 'numpy')
 
         self.derivatives_dict_smp = {
             ('id', 'id'): self.scalar_kernel, # Order 0
             ('Dx1','id') : Dx1_G, # Order 1
             ('Dx2','id') : Dx2_G,
-            ('id','Dy1') : Dy1_G, # Order 1
+            ('id','Dy1') : Dy1_G,
             ('id','Dy2') : Dy2_G,
             ('Dx1','Dy1') : Dx1_Dy1_G, # Order 2
             ('Dx1','Dy2') : Dx1_Dy2_G,
             ('Dx2','Dy1') : Dx2_Dy1_G,
             ('Dx2','Dy2') : Dx2_Dy2_G,
-            ('Lx','Dy1') : Lx_Dy1_G, # Order 3
+            ('Lx','id')  : Lx_G,
+            ('id','Ly')  : Ly_G,
+            ('Dx1_Lx','id')  : Dx1_Lx_G, # Order 3
+            ('Dx2_Lx','id')  : Dx2_Lx_G,
+            ('Lx','Dy1') : Lx_Dy1_G,
             ('Lx','Dy2') : Lx_Dy2_G,
+            ('Dx1','Ly') : Dx1_Ly_G,
+            ('Dx2','Ly') : Dx2_Ly_G,
+            ('Dx1_Lx', 'Dy1') : Dx1_Lx_Dy1_G, # Order 4
+            ('Dx1_Lx', 'Dy2') : Dx1_Lx_Dy2_G,
+            ('Dx2_Lx', 'Dy1') : Dx2_Lx_Dy1_G,
+            ('Dx2_Lx', 'Dy2') : Dx2_Lx_Dy2_G,
+            ('Lx', 'Ly') : LxLy_G,
+            ('Lx_Lx' , 'id') : LxLx_G,
+            ('Lx_Lx' , 'Dy1') : Dy1_LxLx_G, # Order 5
+            ('Lx_Lx' , 'Dy2') : Dy2_LxLx_G,
+            ('Dx1_Lx', 'Ly') : Dx1_LxLy_G,
+            ('Dx2_Lx', 'Ly') : Dx2_LxLy_G,
+            ('Lx_Lx' , 'Ly') : LxLxLy_G, # Order 6
         }
 
         # create numpy functions from sympy kernel derivatives
@@ -387,7 +379,7 @@ class Kernel(object):
             N_eigen += 1
             trace_indicator = np.sum(Lambda[0:N_eigen]) / trace_A
         
-        N_eigen_limit = 100 # upper limit
+        N_eigen_limit = 200 # upper limit
         if N_eigen > N_eigen_limit :
             N_eigen = N_eigen_limit
             trace_indicator = np.sum(Lambda[0:N_eigen]) / trace_A

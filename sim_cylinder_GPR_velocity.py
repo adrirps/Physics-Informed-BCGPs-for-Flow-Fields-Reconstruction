@@ -5,7 +5,7 @@
 
 # Physics-Informed BCGPs for Flow Fields Reconstruction : Flow around cylinder profile
 
-# Authored by Adrian Padilla-Segarra (ONERA and INSA Toulouse) - Sep. 2025
+# Authored by Adrian Padilla-Segarra (ONERA and INSA Toulouse) - Jan. 2026
 
 
 # -------------------------------------------------------------------------------------------------------------
@@ -16,7 +16,7 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 
-import core.model_tools as model_tools
+from core.models import GPR_model
 import core.kernels as knp
 import core.GPR as gp
 import core.data_treatment as data_tools
@@ -43,6 +43,7 @@ def get_parser():
 
     # visualization
     parser.add_argument("--visualize", action ='store_true') # field estimations
+    parser.add_argument("--hide_colorbar", action ='store_true')
 
     return  parser.parse_args()
 
@@ -60,7 +61,7 @@ config.boundary_definition = {
 # Initialization
 # -------------------------------------------------------------------------------------------------------------
 
-model = model_tools.main_tools(config)
+model = GPR_model(config)
 
 # -------------------------------------------------------------------------------------------------------------
 # Data
@@ -83,7 +84,7 @@ print('[Data] Internal data is loaded for computations')
 
 model.define_domain(domain_input = domain_input)
 
-t_fixed = 80 # time iteration
+t_fixed = 80 # simulation iteration
 
 model.set_boundary(fixed_time = t_fixed, N_boundary_section = 30)
 
@@ -133,7 +134,7 @@ if hasattr(config, 'obstacle_type') and (not config.base_kernel_without_BC) :
                                     N_test_obstacle = 20,
                                     N_test_domain = 200)
 
-    N_integration = 2000
+    N_integration = 400
 
     kernel.obstacle_spectral_decomposition( config.obstacle_type,
                                 obstacle_parameters = config.obstacle_parameters,
@@ -187,7 +188,8 @@ velocity_obs = velocity_obs[cond_indexes,:]
 
 # add specific region
 if N_local_region > 0 :
-    X_local_region, velocity_region, tol_min = model.set_local_region('box', N_local_region, local_region_domain)
+    X_local_region, tol_min = model.set_local_region('box', N_local_region, local_region_domain)
+    velocity_region = model.get_true_fields(t_fixed, X_local_region, out_list = 'velocity')['velocity']
     X_obs = np.vstack((X_local_region, X_obs))
     velocity_obs = np.vstack((velocity_region, velocity_obs))
 
@@ -230,7 +232,7 @@ spectral_precision = []
 
 # set spectral precision
 
-limit = 13
+limit = 14
 if config.spectral_precision == 'last' :
     spectral_precision_integers = np.array([limit])
 elif config.spectral_precision == 'grid' :
@@ -250,9 +252,9 @@ for it_tol in tol_grid :
 
     # Perform estimations
 
-    out_dict = model.perform_GPR(GP, observations_dict, out_list = ['domain', 'obstacle', 'stream'], plot_list = 'velocity')
+    out_dict = model.perform_GPR(GP, observations_dict, out_list = ['domain', 'obstacle', 'stream_obstacle'], plot_list = 'velocity')
 
-    abs_scalar_stream.append(np.abs(out_dict['stream']))
+    abs_scalar_stream.append(np.abs(out_dict['stream_obstacle']))
 
     # compute relative aggregated error
 
@@ -261,7 +263,6 @@ for it_tol in tol_grid :
     rel_agg_obstacle_tangent.append(rel_agg_obstacle_tangent_n)
 
     print(f'[Model] Relative-agg. normal components of velocity around obstacle  : {rel_agg_obstacle_normal}')
-    # print(f'[Model] Relative-agg. tangent components of velocity around obstacle  : {rel_agg_obstacle_tangent}')
 
 
 # -------------------------------------------------------------------------------------------------------------

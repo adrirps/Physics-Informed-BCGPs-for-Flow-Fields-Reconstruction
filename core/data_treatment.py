@@ -1,16 +1,14 @@
 import os
-import dill
 import gzip
 import shutil
 
 import numpy as np
 import scipy as sp
 import matplotlib.pyplot as plt
-import matplotlib.patches as pth
 import matplotlib.tri as ptri
-import matplotlib.animation as pla
 import core.Ofpp as Ofpp
-from datetime import datetime
+
+from .profiles import cylinder, NACA_airfoil
 
 # Utility for OpenFOAM data treatment
 
@@ -31,7 +29,7 @@ class FOAM_for_GPR(object):
 
         # Read mesh and cell centres
         try :
-            centers_file_path = os.path.join(case_folder_path, r'0\C') # read at iteration 0
+            centers_file_path = os.path.join(case_folder_path, '0','C') # read at iteration 0
             foam_mesh_cell_centres = Ofpp.parse_internal_field(centers_file_path)
         except :
             raise ValueError('[Data] There is no centers file C in the case folder - iteration 0')
@@ -44,18 +42,34 @@ class FOAM_for_GPR(object):
         foam_centres = self.set_reference(foam_mesh_cell_centres[:,0:2], kwargs.get('reference_point')) # get only 2D data
         domain = self.set_domain(foam_centres, domain_input = kwargs.get('domain_input'))
 
-        # Read velocity data files (all iterations)
         N_time = time_series.shape[0]
         u_data_internal = np.zeros((N_time,foam_mesh_num_cell,2))
 
-
+        # Read velocity data files (all iterations)
+        print('[Data] Reading flow velocity field for each time step')
         for it_t in range(N_time):
-            file_path = os.path.join(case_folder_path, str(time_series[it_t])) # add time
-            u_data_internal_read = Ofpp.parse_internal_field(file_path + '\\U')
+            if int(time_series[it_t]) - time_series[it_t] == 0 :
+                file_it = str(int(time_series[it_t]))
+            else :
+                file_it = str(time_series[it_t])
+            file_path = os.path.join(case_folder_path, file_it) # add iteration
+
+            u_data_internal_read = Ofpp.parse_internal_field(os.path.join(file_path, 'U'))
             u_data_internal[it_t,:,:] = u_data_internal_read[:,0:2]
 
-        self.case_folder_path = case_folder_path
+        # restrict data to domain
+        indexes_domain = np.where((foam_centres[:, 0] >= domain[0,0]) & (foam_centres[:, 0] <= domain[0,1]) & 
+                (foam_centres[:, 1] >= domain[1,0]) & (foam_centres[:, 1] <= domain[1,1]))[0]
+
+        foam_centres = foam_centres[indexes_domain,:]
+        u_data_internal = u_data_internal[:,indexes_domain,:]
+
+        # set obstacle points (for plots)
         self.domain = domain
+        self.set_obstacle_points(N_obstacle_points = 3000)
+
+        # save objects
+        self.case_folder_path = case_folder_path
         self.time_series = time_series
         self.time_step = time_step
         self.foam_centres = foam_centres
@@ -77,7 +91,7 @@ class FOAM_for_GPR(object):
         print(f'[Data] Loading cell centres with reference shift {reference_point}')
         return centres
     
-    def set_domain(self,centres, domain_input) :
+    def set_domain(self, centres, domain_input) :
         centres_min = centres.min(axis = 0)
         centres_max = centres.max(axis = 0)
         domain = np.vstack((centres_min,centres_max)).transpose()
@@ -87,14 +101,22 @@ class FOAM_for_GPR(object):
         print(f'[Data] Domain reference set for data as to [{domain[0,0]}, {domain[0,1]}] x [{domain[1,0]}, {domain[1,1]}]')
         return domain
     
+    def float_try(self,s):
+        try:
+            float(s)
+            return True
+        except ValueError:
+            return False
+    
     def set_time(self,case_folder_path,time_input) :
 
+        # read time/iteration files
         all_files = np.array(os.listdir(case_folder_path))
-        isdigit_vect = np.vectorize(str.isdigit)
+        isdigit_vect = np.vectorize(self.float_try)
         digit_files = all_files[isdigit_vect(all_files)]
 
         # Reorder time and set interval
-        time_series = digit_files.astype(int)
+        time_series = digit_files.astype(float)
         ordered_time_indexes = np.argsort(time_series)
         time_series = time_series[ordered_time_indexes][1:] # file '0' is not data but OpenFoam configuration
 
@@ -111,10 +133,10 @@ class FOAM_for_GPR(object):
     def read_velocity_compressed_file(file_path) :
 
         try :
-            with gzip.open(file_path + "\\U.gz", "rb") as f_in:
+            with gzip.open(os.path.join(file_path, "U.gz"), "rb") as f_in:
                 with open("U", "wb") as f_out:
                     shutil.copyfileobj(f_in, f_out)
-            return Ofpp.parse_internal_field(file_path + '\\U')
+            return Ofpp.parse_internal_field(os.path.join(file_path, 'U') )
         except:
             raise ValueError('[Data] Reading error of velocity file U.gz')
 
@@ -258,12 +280,11 @@ class FOAM_for_GPR(object):
         d11 = self.domain[1,1]
         dxh = d01 - d00
         dyh = d11 - d10
-        d_gap = 0.2
+        d_gap = 0.05
         ax.set_xlim(d00 - d_gap*dxh, d01 + d_gap*dxh)
         ax.set_ylim(d10 - d_gap*dyh, d11 + d_gap*dyh)
         ax.set_aspect('equal', adjustable='box')
-        square = pth.Rectangle((d00, d10), d01, d11, edgecolor='black', facecolor='none')
-        ax.add_patch(square)
+
 
     def get_domain_points(self, **kwargs) :
         
@@ -290,19 +311,6 @@ class FOAM_for_GPR(object):
         velocity_domain_all = np.zeros((N_time, N_domain, 2))
         velocity_domain_all = self.u_data_internal[:, nearest_indexes, :]
 
-        # plot
-        X_dict = {
-            'domain' : X_domain_all,
-            'domain search' : X_domain_search
-        }
-        velocity_dict = {'domain' : velocity_domain_all[3,] }
-        symbols_dict = {'domain search' : 'x'}
-
-
-        if self.config.visualize :
-            self.plot_data(X_dict, velocity_dict, symbols_dict = symbols_dict,
-                            show_obstacle = True,
-                            title = 'Selected domain points')
 
         X_domain = {
             'all' : X_domain_all
@@ -315,7 +323,56 @@ class FOAM_for_GPR(object):
         return X_domain, velocity_domain
 
 
-    def filter_close_points(X_grid, tol_dist) :
+
+    def set_obstacle_points(self, N_obstacle_points) :
+
+        # set interpolation points : over obstacle boundary
+        N_grid = N_obstacle_points
+
+        
+        if self.config.obstacle_type == 'cylinder' :
+
+            s_grid = np.linspace(0, 2*np.pi, N_grid + 1)[:-1]
+            X_obstacle = np.zeros((N_grid,2))
+
+            self.cylinder = cylinder(self.config.obstacle_parameters)
+            X_obstacle[:,0] = self.cylinder.gamma_1_np(s_grid)
+            X_obstacle[:,1] = self.cylinder.gamma_2_np(s_grid)
+
+            print('[GPR Model] Obstacle points set according to kernel gamma transformation')
+
+        elif self.config.obstacle_type == 'NACA_airfoil' :
+
+            obstacle_parameters = self.config.obstacle_parameters
+            center_0 = obstacle_parameters[0]
+            center_1 = obstacle_parameters[1]
+            NACA_code = obstacle_parameters[2]
+            chord_length = obstacle_parameters[3]
+            self.airfoil = NACA_airfoil(NACA_code)
+
+            X_obstacle, s_grid = self.airfoil.boundary_values(N_grid,chord_length,limits = [0,2*np.pi] ) # complete domain set for evaluation
+            if s_grid[-1] == 2*np.pi :
+                X_obstacle = X_obstacle[:-1,:] # last point not included since compact_set domain is periodic
+                s_grid = s_grid[:-1]
+            X_obstacle[:,0] = X_obstacle[:,0] + center_0
+            X_obstacle[:,1] = X_obstacle[:,1] + center_1
+
+        # set inside domain only
+
+        indexes_domain = np.where((X_obstacle[:, 0] >= self.domain[0,0]) & (X_obstacle[:, 0] <= self.domain[0,1]) & 
+                        (X_obstacle[:, 1] >= self.domain[1,0]) & (X_obstacle[:, 1] <= self.domain[1,1]))[0]
+        
+        X_obstacle = X_obstacle[indexes_domain,:]
+        s_grid = s_grid[indexes_domain]
+
+        self.X_obstacle = X_obstacle
+        self.N_obstacle = self.X_obstacle.shape[0]
+        self.obstacle_s_grid = s_grid # for error computation
+
+        print(f'[GPR Model] Obstacle points set at {self.N_obstacle} points')
+
+
+    def filter_close_points(self, X_grid, tol_dist) :
         X_grid_tree = sp.spatial.KDTree(X_grid)
         indexes = np.ones(len(X_grid), dtype=bool)
 

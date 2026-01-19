@@ -5,18 +5,18 @@
 
 # Physics-Informed BCGPs for Flow Fields Reconstruction : Flow around NACA 0412 airfoil
 
-# Authored by Adrian Padilla-Segarra (ONERA and INSA Toulouse) - Sep. 2025
+# Authored by Adrian Padilla-Segarra (ONERA and INSA Toulouse) - Jan. 2026
 
 
 # -------------------------------------------------------------------------------------------------------------
 # Libraries
 # -------------------------------------------------------------------------------------------------------------
 
-import argparse
+import argparse, sys
 import numpy as np
 import matplotlib.pyplot as plt
 
-import core.model_tools as model_tools
+from core.models import GPR_model
 import core.kernels as knp
 import core.GPR as gp
 import core.data_treatment as data_tools
@@ -35,7 +35,7 @@ def get_parser():
 
     # kernel
     parser.add_argument("--kernel_function", type = str, default='RBF_anisotropic_additive')
-    parser.add_argument("--kernel_parameter", type = float, nargs='+', default = [ 0.4, 0.64, 8, 2])  # lcor, sigma, anist. 1, anist. 2
+    parser.add_argument("--kernel_parameter", type = float, nargs='+', default = [ 0.01, 0.1, 8, 0])  # sigma, lcor, alpha_0, M # RBF as default
 
     parser.add_argument("--base_kernel_without_BC", action ='store_true')
     parser.add_argument("--KL_measure", type = str, default = 'surface') # or 'pushforward'
@@ -43,6 +43,7 @@ def get_parser():
 
     # visualization
     parser.add_argument("--visualize", action ='store_true') # field estimations
+    parser.add_argument("--hide_colorbar", action ='store_true')
 
     return  parser.parse_args()
 
@@ -60,7 +61,8 @@ config.boundary_definition = {
 # Initialization
 # -------------------------------------------------------------------------------------------------------------
 
-model = model_tools.main_tools(config)
+model = GPR_model(config)
+model.v_map = 'turbo' # for velocity plots
 
 # -------------------------------------------------------------------------------------------------------------
 # Data
@@ -94,9 +96,8 @@ model.set_obstacle_points(N_obstacle_points = 5000) # for interpolation
 # Setting : Interpolation
 # -------------------------------------------------------------------------------------------------------------
 
-model.set_airfoil_box(distance_tol = 0.001, fixed_time = t_fixed) # after obstacle load
 
-model.set_domain_interpolation_points(N_domain_interpolation = 10000,
+model.set_domain_interpolation_points(N_domain_interpolation = 2000,
                                     method = 'truth_at_data_points',
                                     fixed_time = t_fixed,
                                     airfoil_box_distance_interpolation = 0.012)
@@ -107,7 +108,10 @@ model.compute_Reynolds_number(viscosity = 1.55e-05)
 # Solution visualization
 # -------------------------------------------------------------------------------------------------------------
 
+model.plot_u_max = 0.075
 model.plot_solution_snapshot()
+
+u_truth_profile = model.get_true_fields(0, model.X_obstacle, out_list = 'velocity')['velocity']
 
 # -------------------------------------------------------------------------------------------------------------
 # Covariance kernel
@@ -135,7 +139,7 @@ if hasattr(config, 'obstacle_type') and (not config.base_kernel_without_BC) :
                                     N_test_obstacle = 20,
                                     N_test_domain = 200)
 
-    N_integration = 2000
+    N_integration = 300
 
     kernel.obstacle_spectral_decomposition( config.obstacle_type,
                                 obstacle_parameters = config.obstacle_parameters,
@@ -151,86 +155,40 @@ if hasattr(config, 'obstacle_type') and (not config.base_kernel_without_BC) :
 # GPR Configuration
 # -------------------------------------------------------------------------------------------------------------
 
-GP = gp.GPR(kernel, use_nugget = 'always', nugget_type = 'standard', nugget = 1e-10 ) 
+if config.kernel_parameter[3] == 0 :
+    nugget_val = 1e-8
+else :
+    nugget_val = 1e-10
+
+GP = gp.GPR(kernel, use_nugget = 'always', nugget_type = 'standard', nugget = nugget_val )
 
 # -------------------------------------------------------------------------------------------------------------
 # Observation design
 # -------------------------------------------------------------------------------------------------------------
 
-if config.base_kernel_without_BC :
-    N_normal_observation_discrete = 164
-    N_local_region = 33
-else : # with BCGP
-    N_normal_observation_discrete = 0
-    N_local_region = 50
-
 # set observation grid
-N_domain_observation_points = 400
-X_domain_sub_raw = model.build_grid(N_domain_observation_points, model.domain, with_limits = False)
-np.random.seed(1212)
-X_domain_sub = X_domain_sub_raw + np.random.normal(0, 0.005, X_domain_sub_raw.shape[0]*2).reshape(X_domain_sub_raw.shape) # noise
+X_obs = model.build_noised_grid_domain(seed = 1287, N_grid = 300)
 
-# get velocity values
-X_domain_sub, velocity_domain_sub = model.internal_data.get_domain_points(X_grid_particular = X_domain_sub)
-X_domain_sub['all'], indexes_domain = model.points_inside_domain(X_domain_sub['all'])
-velocity_domain_sub['all'] = velocity_domain_sub['all'][:, indexes_domain,:]
+# filter points close to airfoil
+X_obs, idx_temp = model.filter_airfoil_box(X_obs, distance_tol = 0.007)
 
-# set observations objects
-X_obs = np.vstack((model.X_boundary, X_domain_sub['all']))
-velocity_cond = np.vstack((model.velocity_boundary, velocity_domain_sub['all'][t_fixed,:,:]))
+# get training values
+velocity_obs = model.get_true_fields(0, X_obs, out_list = 'velocity')['velocity']
 
-# filter close points
-inter_distance = 0.003 # lower bound
-X_obs, cond_indexes = model.filter_close_points(X_obs, inter_distance)
-velocity_cond = velocity_cond[cond_indexes,:]
-print(f'[Run Model] Condition points filtered for minimal inter-distance of at least {inter_distance} at {X_obs.shape[0]}')
-
-# add specific region
-X_local_region, velocity_region, tol_min = model.set_local_region('circle', N_region = N_local_region,
-                                                                  region_parameters = [-0.007, 0, 0.03] )
-X_obs = np.vstack((X_local_region, X_obs))
-velocity_cond = np.vstack((velocity_region, velocity_cond))
-
-# filter close to airfoil
-X_obs, indexes_filter = model.filter_airfoil_box(X_obs, distance_tol = 0.001)
-velocity_cond = velocity_cond[indexes_filter,:]
-
-# filter close points
-try: tol_min
-except: tol_min = 1e-10
-X_obs, cond_indexes_local = model.filter_close_points(X_obs, tol_min)
-velocity_cond = velocity_cond[cond_indexes_local,:]
-
-# limit budget without BCGP
-BCGP_observation_limit = 370
-if config.base_kernel_without_BC and X_obs.shape[0] > BCGP_observation_limit :
-    X_obs = X_obs[:BCGP_observation_limit]
-    velocity_cond = velocity_cond[:BCGP_observation_limit]
-
+# save for plot
 model.X_obs = X_obs
-model.velocity_cond = velocity_cond
+print(f'[Design] Observations set at computational domain: {X_obs.shape[0]}')
 
 # set observations
 observations_dict = {
     'structure' : 'velocity',
-    'points'    : model.X_obs,
-    'values'    : model.velocity_cond.flatten()
+    'points'    : X_obs,
+    'values'    : velocity_obs.flatten()
 }
-model.Gram_size = model.X_obs.shape[0]*2
-
-if N_normal_observation_discrete > 0 :
-
-    # add discrete boundary condition as observations (without BCGP)
-
-    model.X_normal_obs, normal_vectors = model.add_discrete_obstacle_observation('discrete_normal', N_normal_observation_discrete)
-    observations_dict['structure'] = 'velocity_and_normal'
-    observations_dict['points_normal'] = model.X_normal_obs
-    observations_dict['normal_vectors'] = normal_vectors
-    observations_dict['values_normal'] = np.zeros((model.X_normal_obs.shape[0],))
-    model.Gram_size += model.X_normal_obs.shape[0]
+model.Gram_size = X_obs.shape[0]*2
 
 # -------------------------------------------------------------------------------------------------------------
-# GPR-based Reconstruction and Relative error computation (with visualization)
+# GPR-based Reconstruction (with visualization)
 # -------------------------------------------------------------------------------------------------------------
 
 rel_agg_obstacle_normal = []
@@ -240,11 +198,10 @@ spectral_precision = []
 
 # set spectral precision
 
-limit = 14
 if config.spectral_precision == 'last' :
-    spectral_precision_integers = np.array([limit])
+    spectral_precision_integers = np.array([12])
 elif config.spectral_precision == 'grid' :
-    spectral_precision_integers = np.arange(9, limit + 1)
+    spectral_precision_integers = np.arange(9, 15)
 tol_grid = 1/(10**spectral_precision_integers.astype(float))
 
 for it_tol in tol_grid :
@@ -260,25 +217,90 @@ for it_tol in tol_grid :
 
     # Perform estimations
 
-    out_dict = model.perform_GPR(GP, observations_dict, out_list = ['domain', 'obstacle', 'stream'], plot_list = 'velocity')
+    out_dict = model.perform_GPR(GP, observations_dict, out_list = ['domain', 'obstacle' ,'stream_obstacle'], plot_list = ['velocity'])
 
-    abs_scalar_stream.append(np.abs(out_dict['stream']))
+    abs_scalar_stream.append(np.abs(out_dict['stream_obstacle']))
 
-    # compute relative aggregated error
+    # compute profile boundary indicator (relative aggregated error on compact set)
 
     rel_agg_obstacle_normal_n, rel_agg_obstacle_tangent_n = model.compute_obstacle_normal_error(out_dict['obstacle'], relative = True)
     rel_agg_obstacle_normal.append(rel_agg_obstacle_normal_n)
     rel_agg_obstacle_tangent.append(rel_agg_obstacle_tangent_n)
 
-    print(f'[Model] Relative-agg. normal components of velocity around obstacle  : {rel_agg_obstacle_normal}')
-    # print(f'[Model] Relative-agg. tangent components of velocity around obstacle  : {rel_agg_obstacle_tangent}')
+    print(f'[Model] Relative-agg. indicator of velocity normal components on obstacle : {rel_agg_obstacle_normal}')
 
+if config.spectral_precision == 'grid' :
+
+    # -------------------------------------------------------------------------------------------------------------
+    # Convergence of profile indicators
+    # -------------------------------------------------------------------------------------------------------------
+
+    if not config.base_kernel_without_BC :
+        model.plot_profile_indicators(spectral_precision, rel_agg_obstacle_normal, abs_scalar_stream )
+
+    plt.show()
+    sys.exit()
 
 # -------------------------------------------------------------------------------------------------------------
-# Convergence of profile indicators
+# Compute and plot residuals
 # -------------------------------------------------------------------------------------------------------------
 
-if not config.base_kernel_without_BC :
-    model.plot_profile_indicators(spectral_precision, rel_agg_obstacle_normal, abs_scalar_stream )
+u_residual = out_dict['u_domain'] - model.velocity_truth
+
+# RMSE of test points
+RMSE = np.sqrt( (u_residual**2).mean() )
+
+# plots
+u_residual_norm = np.linalg.norm( u_residual , axis = 1)
+print(f'[Visualization] Residual max plot: {u_residual_norm.max()}')
+model.do_plot({'u_error' : u_residual_norm }, method = 'u_error', plot_min = 0.0, plot_max = 0.035, save_name = 'velocity_residual')
+
+# -------------------------------------------------------------------------------------------------------------
+# Uncertainty Quantification
+# -------------------------------------------------------------------------------------------------------------
+
+model.print_title('UQ computation')
+u_var = GP.interpolation('velocity_covariance', model.X_domain, observations_dict)
+var_trace = np.diag(u_var)[::2] + np.diag(u_var)[1::2]
+total_SD = np.sqrt( var_trace )
+
+# plot
+model.do_plot({ 'UQ_field' : np.log10(total_SD) }, method = 'UQ_field', plot_min = -7.0, plot_max = -1.0, save_name = 'velocity_total_SD_log')
+
+# UQ obstacle verification
+u_truth_profile = model.get_true_fields(0, model.X_obstacle, out_list = 'velocity')['velocity']
+u_mean_obs = GP.interpolation('velocity_mean', model.X_obstacle, observations_dict).reshape((model.X_obstacle.shape[0],2))
+u_var_check = GP.interpolation('velocity_covariance', model.X_obstacle, observations_dict)
+u_var_trace_check = np.diag(u_var_check)[::2] + np.diag(u_var_check)[1::2]
+u_total_SD_check = np.sqrt(u_var_trace_check)
+
+# plots
+for i in range(2) :
+    fig = plt.figure()
+    plt.plot(model.gamma_grid, u_truth_profile[:,i], 'k--', label = 'truth')
+    plt.plot(model.gamma_grid, u_mean_obs[:,i], label = 'posterior mean')
+    plt.fill_between(model.gamma_grid,
+                     u_mean_obs[:,i] - 1.96*np.sqrt(np.diag(u_var_check)[i::2]),
+                     u_mean_obs[:,i] + 1.96*np.sqrt(np.diag(u_var_check)[i::2]), color='gray', alpha=0.3, label="95% confidence interval")
+    if i == 0 :
+        plt.ylim([-0.005, 0.055])
+        plt.legend(loc="lower right", fontsize = 'small')
+    elif i == 1 :
+        plt.ylim([-0.03, 0.03])
+        plt.legend(loc="upper right", fontsize = 'small')
+
+    plt.xlim([2.35, 3.93])
+
+    # -------------------------------------------------------------------------------------------------------------
+    # Prediction interval coverage
+    # -------------------------------------------------------------------------------------------------------------
+
+    u_coverage_i = np.abs(u_residual[:,i]) / (1.96*np.sqrt(np.diag(u_var)[i::2]))
+    fraction_i = np.sum(u_coverage_i <= 1.0)/ u_coverage_i.shape[0]
+    print(f'Velocity component {i+1} coverage: {fraction_i}')
+
+print(f'Relative-agg. indicator of velocity normal components on obstacle  : {rel_agg_obstacle_normal[0]}')
+print(f'RMSE of {u_residual.shape[0]} test points: {RMSE}')
+
 
 plt.show()
