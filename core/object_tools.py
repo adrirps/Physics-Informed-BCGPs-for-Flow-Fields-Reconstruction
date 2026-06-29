@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import  matplotlib.ticker as plticker
 import matplotlib.tri as ptri
 import matplotlib.path as pth
+import shapely.geometry as spg
 
 from .profiles import cylinder, NACA_airfoil
 
@@ -355,6 +356,16 @@ class main_tools():
             X_obstacle[:,0] = X_obstacle[:,0] + center_0
             X_obstacle[:,1] = X_obstacle[:,1] + center_1
 
+            # for triangulation filter
+
+            X_obstacle_for_filter, s_grid_filter = self.airfoil.boundary_values(3000, chord_length, limits = [0,2*np.pi])
+            self.X_obstacle_for_filter = X_obstacle_for_filter[1:-1,:] # closed set (avoid zero norm values)
+
+            tangent_grid_filter, _ = self.airfoil.curve_derivatives_values(1, chord_length, s_series = s_grid_filter, normalized = True)
+            normal_grid_x_filter = tangent_grid_filter[:,1]
+            normal_grid_y_filter = - tangent_grid_filter[:,0] # outward unit normal
+            self.normal_grid_filter = np.vstack((normal_grid_x_filter, normal_grid_y_filter)).transpose()
+
 
         # set inside domain only and convex hull
 
@@ -666,6 +677,54 @@ class main_tools():
         return np.abs(normal_projections), np.abs(tangent_projections)
 
 
+    def compute_space_integral(self, X_grid, val_grid, **kwargs) :
+
+        field_tri = sp.spatial.Delaunay(X_grid)
+
+        # filter obstacle
+
+        field_tri_filtered = self.filter_tri(field_tri, self.X_obstacle_for_filter, self.normal_grid_filter, tol_dist = 1e-4)
+
+        # compute integral
+
+        val_int = 0.0
+        area_dom = 0.0
+
+        for it_tri in field_tri_filtered.triangles:
+
+            x1, x2 = X_grid[it_tri,:].transpose()
+
+            area =  0.5 * abs( x1[0]*(x2[1] - x2[2]) +
+                               x1[1]*(x2[2] - x2[0]) +
+                               x1[2]*(x2[0] - x2[1]) )
+
+            val_int += val_grid[it_tri].mean() * area
+
+            area_dom += area
+
+        if 'dom_relative' in kwargs and kwargs.get('dom_relative') :
+            val_int = val_int / area_dom
+
+            return val_int, area_dom
+
+        else :
+
+            return val_int
+
+    def filter_tri(self, tri, X_obstacle, normal_grid, tol_dist ) :
+
+        obstacle_poly = spg.Polygon(X_obstacle - tol_dist * normal_grid)
+        func_poly = [spg.Polygon(tri.points[s]) for s in tri.simplices]
+
+        mask_inside = np.array([obstacle_poly.intersects(t) for t in func_poly])
+        remaining_simplices = tri.simplices[~mask_inside]
+        filtered_points = tri.points[np.unique(remaining_simplices)]
+
+        tri_filtered = ptri.Triangulation(tri.points[:,0], tri.points[:,1], remaining_simplices)
+
+        return tri_filtered
+
+
     def do_plot(self, plot_dict, method, **kwargs) :
 
         if method == 'error_relative' :
@@ -687,8 +746,8 @@ class main_tools():
 
 
         plot_size = 10
-        plot_size_scale = (plot_size * (self.domain[1,1]-self.domain[1,0])/(self.domain[0,1]-self.domain[0,0]))*1.1
-        fig = plt.figure(figsize = (plot_size,plot_size_scale))
+        plot_size_scale = (plot_size * (self.domain[1,1]-self.domain[1,0])/(self.domain[0,1]-self.domain[0,0]))
+        fig = plt.figure(figsize = (plot_size*1.1,plot_size_scale))
         
         if not method.startswith('data') :
 
@@ -754,7 +813,11 @@ class main_tools():
             emax = kwargs.get('plot_max')
             emin = kwargs.get('plot_min')
             levels = np.linspace(emin, emax, 150)
-            colormap_plot = plt.tricontourf(X_triang, field_error, levels = levels, cmap = 'brg', vmin = emin, vmax = emax )
+            if 'cmap' in kwargs :
+                cmap = kwargs.get('cmap')
+            else :
+                cmap = 'brg'
+            colormap_plot = plt.tricontourf(X_triang, field_error, levels = levels, cmap = cmap, vmin = emin, vmax = emax )
 
         elif method == 'UQ_field' :
 
@@ -812,7 +875,7 @@ class main_tools():
 
         if not self.config.hide_colorbar :
             cb_ax = fig.add_axes([0.91, 0.124, 0.02, 0.754])
-            if np.abs(colormap_plot.norm.vmax + colormap_plot.norm.vmin)/2 < 1e-2 :
+            if np.abs(colormap_plot.norm.vmax) + np.abs(colormap_plot.norm.vmin)/2 < 1e-2 :
                 colorbar_format = plticker.FormatStrFormatter('%.2e')
             elif np.abs(colormap_plot.norm.vmax + colormap_plot.norm.vmin)/2 < 1.0 :
                 colorbar_format = plticker.FormatStrFormatter('%.3f')

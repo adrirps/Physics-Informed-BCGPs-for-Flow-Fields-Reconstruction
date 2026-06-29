@@ -5,7 +5,7 @@
 
 # Physics-Informed BCGPs for Flow Fields Reconstruction : Flow around NACA 0412 airfoil
 
-# Authored by Adrian Padilla-Segarra (ONERA and INSA Toulouse) - Jan. 2026
+# Authored by Adrian Padilla-Segarra (ONERA and INSA Toulouse) - Jun. 2026
 
 
 # -------------------------------------------------------------------------------------------------------------
@@ -37,6 +37,7 @@ def get_parser():
     parser.add_argument("--kernel_function", type = str, default='RBF_anisotropic_additive')
     parser.add_argument("--additive_scales", type = int, default = 0) # parameter M
 
+    parser.add_argument("--without_div_free", action ='store_true')
     parser.add_argument("--base_kernel_without_BC", action ='store_true')
     parser.add_argument("--KL_measure", type = str, default = 'surface') # or 'pushforward'
 
@@ -245,10 +246,21 @@ for it_gs in range(N_gs) :
         # -------------------------------------------------------------------------------------------------------------
 
         # Perform estimations
-        out_dict = model.perform_GPR(GP, observations_dict_k, out_list = ['velocity'], X_particular = X_test)
 
-        out_dict_check = model.perform_GPR(GP, observations_dict_k, out_list = ['obstacle', 'stream_obstacle'])
-        abs_scalar_stream =np.abs(out_dict_check['stream_obstacle'])
+        if not config.without_div_free :
+            out_dict = model.perform_GPR(GP, observations_dict_k, out_list = ['velocity'], X_particular = X_test)
+
+            out_dict_check = model.perform_GPR(GP, observations_dict_k, out_list = ['obstacle', 'stream_obstacle'])
+            abs_scalar_stream =np.abs(out_dict_check['stream_obstacle'])
+
+            u_residual = out_dict['velocity_particular'] - u_test_truth
+
+        else :
+            out_dict = model.vector_valued_GPR(GP, observations_dict_k, out_list = ['velocity'], X_new = X_test)
+
+            out_dict_check = model.vector_valued_GPR(GP, observations_dict_k, out_list = ['obstacle'])
+
+            u_residual = out_dict['u_domain'] - u_test_truth
 
         # compute profile boundary indicator (relative aggregated error on compact set)
         rel_agg_obstacle_normal, rel_agg_obstacle_tangent = model.compute_obstacle_normal_error(out_dict_check['obstacle'], relative = True)
@@ -259,10 +271,13 @@ for it_gs in range(N_gs) :
         # Compute and plot residuals
         # -------------------------------------------------------------------------------------------------------------
 
-        u_residual = out_dict['velocity_particular'] - u_test_truth
-
         model.print_title('UQ computation')
-        u_var = GP.interpolation('velocity_covariance', X_test, observations_dict_k)
+
+        if not config.without_div_free :
+            u_var = GP.interpolation('velocity_covariance', X_test, observations_dict_k)
+        else :
+            u_var = model.vector_valued_GPR(GP, observations_dict_k, out_list = ['velocity_covariance'], X_new = X_test)['u_covariance']
+
         var_trace = np.diag(u_var)[::2] + np.diag(u_var)[1::2]
         total_SD = np.sqrt( var_trace )
 

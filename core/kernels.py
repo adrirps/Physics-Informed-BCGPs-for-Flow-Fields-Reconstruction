@@ -4,6 +4,7 @@ import sympy as smp
 import scipy as sp
 import matplotlib.pyplot as plt
 import matplotlib.path as pth
+import  matplotlib.ticker as plticker
 import os
 import sys
 import time
@@ -17,6 +18,8 @@ class Kernel(object):
 
         self.scalar_kernel_name = kernel_name
         self.kernel_parameters = kwargs.get('parameters')
+
+        print(f'[Kernel] Input hyperparameters: {self.kernel_parameters}')
 
         if not kwargs.get('base_kernel_without_BC') is None :
             self.base_kernel_without_BC = kwargs.get('base_kernel_without_BC')
@@ -202,8 +205,6 @@ class Kernel(object):
 
         # saving configuration
 
-        self.start_BC_time = time.time()
-
         self.obstacle_type = obstacle_type
         self.obstacle_parameters = obstacle_parameters
         
@@ -239,6 +240,9 @@ class Kernel(object):
         N_integration = kwargs.get('N_integration') 
         mode_precision = kwargs.get('mode_precision')
         KL_measure = kwargs.get('KL_measure')
+
+        self.start_BC_time = time.time()
+
         self.eigen_decomposition(KL_measure = KL_measure,
                                 N_integration = N_integration, mode_precision = mode_precision,
                                 test_eigenfunction_accuracy = True,
@@ -251,7 +255,7 @@ class Kernel(object):
 
         self.end_BC_time = time.time()
 
-        print(f'[Kernel] BC procedure duration : {(self.end_BC_time - self.start_BC_time)/60:.4f} minutes ')
+        print(f'[Kernel] BC procedure duration : {(self.end_BC_time - self.start_BC_time):.4f} seconds ')
         print(f'[Kernel] BC finish date time : {datetime.now().strftime('%Y%m%d_%H%M%S')} ')
 
         # end log file
@@ -412,9 +416,9 @@ class Kernel(object):
 
         self.Lambda_all = Lambda
 
-        self.discrete_eigenfunctions = discrete_eigenfunctions # all eigenfunctions version
+        self.discrete_eigenfunctions = discrete_eigenfunctions # of spectral problem with sqrt H / all eigenfunctions version
 
-        self.weighted_eigenfunctions = weighted_eigenfunctions # all eigenfunctions version
+        self.weighted_eigenfunctions = weighted_eigenfunctions # with weight H / all eigenfunctions version
 
         self.KL_measure = KL_measure
 
@@ -424,9 +428,10 @@ class Kernel(object):
 
         # Eigenvalues plot
 
-        plt.figure()
-        plt.plot(Lambda[:N_eigen], '-o')
-        plt.title(r'Retained eigenvalues of Karhunen-Loève Expansion')
+        if self.visualize :
+            plt.figure()
+            plt.plot(Lambda[:N_eigen], '-o')
+            plt.title(r'Retained eigenvalues of Karhunen-Loève Expansion')
 
         if Lambda[N_eigen-1] <= 0 :
             raise ValueError("Retained eigenvalues cannot be zero or negative")
@@ -536,14 +541,16 @@ class Kernel(object):
             print(f'[Kernel] G integral decomposition (on D) error mean : {mean_test_decomposition_error.mean()}')
             print(f'[Kernel] G integral decomposition (on D) error max : {mean_test_decomposition_error.max()}')
 
-            # Plot
-            plt.figure(figsize=(10,4))
-            plt.plot(X_obstacle[:,0],X_obstacle[:,1])
-            plt.scatter(X_test_decomposition[:,0],X_test_decomposition[:,1], c = mean_test_decomposition_error)
-            cbar = plt.colorbar(format="%.1e")
-            cbar.set_label('Mean of evaluations over obstacle', rotation = 270, labelpad=15)
-            plt.axis('equal')
-            plt.title(r'Approximation of $G(\cdot,x^\prime)= 0 $ over obstacle, for different choice of $x^\prime$')
+            if self.visualize :
+
+                # Plot
+                plt.figure(figsize=(10,4))
+                plt.plot(X_obstacle[:,0],X_obstacle[:,1])
+                plt.scatter(X_test_decomposition[:,0],X_test_decomposition[:,1], c = mean_test_decomposition_error)
+                cbar = plt.colorbar(format="%.1e")
+                cbar.set_label('Mean of evaluations over obstacle', rotation = 270, labelpad=15)
+                plt.axis('equal')
+                plt.title(r'Approximation of $G(\cdot,x^\prime)= 0 $ over obstacle, for different choice of $x^\prime$')
 
             print('[Kernel] Kernel Eigenproblem finished !')
 
@@ -624,6 +631,25 @@ class Kernel(object):
             val[1::2, 1::2] = K22  # (1,1) sub-position
 
         return val
+
+    def compute_matrix_kernel(self, X, Y, **kwargs) :
+
+        N_val_x = X.shape[0] * 2
+        N_val_y = Y.shape[0] * 2
+        val = np.zeros((N_val_x, N_val_y))
+
+        scalar_kernel = self.compute_kernel('id','id', X, Y, **kwargs)
+
+        rho = 0.5
+
+        # assembly
+        val[0::2, 0::2] = scalar_kernel  # (0,0) sub-position
+        val[0::2, 1::2] = rho * scalar_kernel  # (0,1) sub-position
+        val[1::2, 0::2] = rho * scalar_kernel  # (1,0) sub-position
+        val[1::2, 1::2] = scalar_kernel  # (1,1) sub-position
+
+        return val
+
     
     def compute_vector_stream(self, X, Y) :
 

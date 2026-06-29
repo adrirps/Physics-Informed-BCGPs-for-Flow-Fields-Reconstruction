@@ -5,14 +5,14 @@
 
 # Physics-Informed BCGPs for Flow Fields Reconstruction : Flow around NACA 0412 airfoil
 
-# Authored by Adrian Padilla-Segarra (ONERA and INSA Toulouse) - Jan. 2026
+# Authored by Adrian Padilla-Segarra (ONERA and INSA Toulouse) - Jun. 2026
 
 
 # -------------------------------------------------------------------------------------------------------------
 # Libraries
 # -------------------------------------------------------------------------------------------------------------
 
-import argparse, sys
+import argparse, sys, time
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -35,8 +35,9 @@ def get_parser():
 
     # kernel
     parser.add_argument("--kernel_function", type = str, default='RBF_anisotropic_additive')
-    parser.add_argument("--kernel_parameter", type = float, nargs='+', default = [ 0.01, 0.1, 8, 0])  # sigma, lcor, alpha_0, M # RBF as default
+    parser.add_argument("--kernel_parameter", type = float, nargs='+', default = [ 0.5, 0.1, 8, 0])  # sigma, lcor, alpha_0, M
 
+    parser.add_argument("--without_div_free", action ='store_true')
     parser.add_argument("--base_kernel_without_BC", action ='store_true')
     parser.add_argument("--KL_measure", type = str, default = 'surface') # or 'pushforward'
     parser.add_argument("--spectral_precision", type = str, default = 'last') # or 'grid'
@@ -217,9 +218,31 @@ for it_tol in tol_grid :
 
     # Perform estimations
 
-    out_dict = model.perform_GPR(GP, observations_dict, out_list = ['domain', 'obstacle' ,'stream_obstacle'], plot_list = ['velocity'])
+    start_time_mean = time.time()
 
-    abs_scalar_stream.append(np.abs(out_dict['stream_obstacle']))
+    if not config.without_div_free :
+        out_dict = model.perform_GPR(GP, observations_dict, out_list = ['domain', 'obstacle' ,'stream_obstacle'], plot_list = ['velocity'])
+
+        abs_scalar_stream.append(np.abs(out_dict['stream_obstacle']))
+
+    else :
+        out_dict = model.vector_valued_GPR(GP, observations_dict, out_list = ['velocity', 'obstacle'], plot_list = ['velocity'])
+
+    end_time_mean = time.time()
+
+    print(f'[Time] Velocity posterior mean CPU time: {end_time_mean - start_time_mean:.3f} seconds')
+
+
+    # divergence fit
+
+    div_val = model.compute_divergence(GP, observations_dict, eps = 1e-6)
+
+    plot_scale = 3.1
+    model.do_plot({'u_error' : div_val }, method = 'u_error', plot_min = - plot_scale, plot_max = plot_scale,
+                  save_name = 'velocity_divergence', cmap = 'seismic', title = False )
+
+    eps_div, _ = model.compute_space_integral(model.X_domain, np.abs(div_val), dom_relative = True )
+
 
     # compute profile boundary indicator (relative aggregated error on compact set)
 
@@ -260,7 +283,20 @@ model.do_plot({'u_error' : u_residual_norm }, method = 'u_error', plot_min = 0.0
 # -------------------------------------------------------------------------------------------------------------
 
 model.print_title('UQ computation')
-u_var = GP.interpolation('velocity_covariance', model.X_domain, observations_dict)
+
+start_time_cov = time.time()
+
+if not config.without_div_free :
+    u_var = GP.interpolation('velocity_covariance', model.X_domain, observations_dict)
+else :
+    out_var = model.vector_valued_GPR(GP, observations_dict, out_list = ['velocity_covariance'])
+    u_var = out_var['u_covariance']
+
+end_time_cov = time.time()
+
+print(f'[Time] Velocity posterior covariance CPU time: {end_time_cov - start_time_cov:.3f} seconds')
+
+
 var_trace = np.diag(u_var)[::2] + np.diag(u_var)[1::2]
 total_SD = np.sqrt( var_trace )
 
@@ -269,8 +305,15 @@ model.do_plot({ 'UQ_field' : np.log10(total_SD) }, method = 'UQ_field', plot_min
 
 # UQ obstacle verification
 u_truth_profile = model.get_true_fields(0, model.X_obstacle, out_list = 'velocity')['velocity']
-u_mean_obs = GP.interpolation('velocity_mean', model.X_obstacle, observations_dict).reshape((model.X_obstacle.shape[0],2))
-u_var_check = GP.interpolation('velocity_covariance', model.X_obstacle, observations_dict)
+
+if not config.without_div_free :
+    u_mean_obs = GP.interpolation('velocity_mean', model.X_obstacle, observations_dict).reshape((model.X_obstacle.shape[0],2))
+    u_var_check = GP.interpolation('velocity_covariance', model.X_obstacle, observations_dict)
+else :
+    out_var_obs = model.vector_valued_GPR(GP, observations_dict, out_list = ['obstacle','velocity_covariance'], X_new = model.X_obstacle)
+    u_mean_obs = out_var_obs['obstacle']
+    u_var_check = out_var_obs['u_covariance']
+
 u_var_trace_check = np.diag(u_var_check)[::2] + np.diag(u_var_check)[1::2]
 u_total_SD_check = np.sqrt(u_var_trace_check)
 
@@ -291,16 +334,19 @@ for i in range(2) :
 
     plt.xlim([2.35, 3.93])
 
+    plt.savefig(r".\BCGP_figures\\" + 'UQ_component_' + str(int(i+1)) + '.pdf', bbox_inches='tight', pad_inches=0.01)
+
     # -------------------------------------------------------------------------------------------------------------
     # Prediction interval coverage
     # -------------------------------------------------------------------------------------------------------------
 
     u_coverage_i = np.abs(u_residual[:,i]) / (1.96*np.sqrt(np.diag(u_var)[i::2]))
     fraction_i = np.sum(u_coverage_i <= 1.0)/ u_coverage_i.shape[0]
-    print(f'Velocity component {i+1} coverage: {fraction_i}')
+    print(f'[Results] Velocity component {i+1} coverage: {fraction_i}')
 
-print(f'Relative-agg. indicator of velocity normal components on obstacle  : {rel_agg_obstacle_normal[0]}')
-print(f'RMSE of {u_residual.shape[0]} test points: {RMSE}')
+print(f'[Results] Relative-agg. indicator of velocity normal components on obstacle  : {rel_agg_obstacle_normal[0]}')
+print(f'[Results] RMSE of {u_residual.shape[0]} test points: {RMSE}')
+print(f'[Results] L1-norm of velocity divergence: {eps_div}')
 
 
 plt.show()
